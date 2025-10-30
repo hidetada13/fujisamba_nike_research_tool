@@ -57,6 +57,99 @@ rescue => e
 end
 
 #--------------------------------------
+# 画像要素から最も信頼できるURLを取得（nike.rbを参考）
+#--------------------------------------
+def best_image_url(driver, img_element)
+  return nil unless img_element
+  url = driver.execute_script(<<~JS, img_element)
+    const img = arguments[0];
+    if (!img) return '';
+    if (img.currentSrc) return img.currentSrc;
+    const srcset = img.getAttribute('srcset') || '';
+    if (srcset) {
+      try {
+        const parts = srcset.split(',').map(s => s.trim());
+        if (parts.length > 0) {
+          const last = parts[parts.length - 1].split(' ')[0];
+          return last || '';
+        }
+      } catch (e) {}
+    }
+    return img.getAttribute('src') || '';
+  JS
+  return (url && !url.empty? && url.include?('nike')) ? url : nil
+rescue => e
+  nil
+end
+
+#--------------------------------------
+# 要素を中央へスクロール（nike.rbを参考）
+#--------------------------------------
+def scroll_into_view_center(driver, element)
+  driver.execute_script('arguments[0].scrollIntoView({behavior: "auto", block: "center"});', element)
+rescue => e
+  nil
+end
+
+#--------------------------------------
+# バリエーションリンクにホバーして画像IDを取得（nike.rbを参考）
+#--------------------------------------
+def extract_variant_image_id_by_hover(driver, variant_link, card_element, item_icon_img_element)
+  begin
+    # メイン画像を取得
+    main_image = find_element_in_scope_by_css(
+      card_element,
+      driver,
+      [
+        'img.product-card__hero-image',
+        'img[data-testid="product-card__hero-image"]',
+        'figure img'
+      ]
+    )
+    
+    return nil unless main_image
+    
+    # ホバー前の画像URL（currentSrc優先）
+    original_image_url = best_image_url(driver, main_image)
+    return nil unless original_image_url
+    
+    # バリエーションリンクにホバー（スクロール + JS mouseover + Actions）
+    scroll_into_view_center(driver, variant_link)
+    driver.execute_script('arguments[0].dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));', variant_link)
+    driver.action.move_to(variant_link).perform
+    
+    # 画像更新を最大2秒ポーリング
+    new_image_url = nil
+    10.times do
+      sleep(0.2)
+      current_main = find_element_in_scope_by_css(
+        card_element,
+        driver,
+        [
+          'img.product-card__hero-image',
+          'img[data-testid="product-card__hero-image"]',
+          'figure img'
+        ]
+      ) || main_image
+      current_url = best_image_url(driver, current_main)
+      if current_url && current_url != original_image_url
+        new_image_url = current_url
+        break
+      end
+    end
+    
+    # ホバー解除（少し外へ移動）
+    driver.action.move_by(0, -100).perform
+    
+    # 画像URLから画像IDを抽出
+    return extract_image_id_from_url(new_image_url) if new_image_url
+    nil
+  rescue => e
+    nil
+  end
+end
+
+#--------------------------------------
 # バリエーション画像IDを取得（nike.rbの実装を参考）
 #--------------------------------------
 def extract_variation_image_ids(card_element, driver, item_vari_num, item_icon_img_element)
@@ -107,24 +200,22 @@ def extract_variation_image_ids(card_element, driver, item_vari_num, item_icon_i
       end
     else
       # 複数バリエーションの場合
-      colorway_links.each do |link|
+      colorway_links.each_with_index do |link, index|
         begin
-          # 画像要素を探す（画像URLから画像IDを抽出）
-          img_element = find_element_in_scope_by_css(
-            link,
-            driver,
-            [
-              'img',
-              '.color-loader__circle img',
-              'div img',
-              'picture img'
-            ]
-          )
-          
-          if img_element
-            # 画像URLから画像IDを抽出（srcまたはcurrentSrc）
-            img_url = img_element.attribute("src") || img_element.attribute("currentSrc")
-            img_id = extract_image_id_from_url(img_url)
+          if index == 0
+            # 1バリエーション目（index == 0）はメイン画像のIDを使用
+            if item_icon_img_element
+              img_id = extract_image_id_from_url(item_icon_img_element.attribute("src"))
+              item_vari_img_ids << img_id if img_id
+            end
+          else
+            # 2番目以降はホバーで画像を読み込んで画像IDを取得
+            img_id = extract_variant_image_id_by_hover(
+              driver,
+              link,
+              card_element,
+              item_icon_img_element
+            )
             item_vari_img_ids << img_id if img_id
           end
         rescue => e
@@ -233,8 +324,18 @@ def scrape_nike_list_page(driver, wait, url, logger)
       item_title = item_card_element.find_element(:xpath, item_title_xpath).text
       item_vari_num_text = item_card_element.find_element(:xpath, item_vari_num_xpath).text
       item_vari_num = extract_numbers(item_vari_num_text)
-
-      if item_vari_num > 4
+      
+      # "+"フラグを確認（nike.rbを参考）
+      has_plus_flag = false
+      begin
+        card_text = driver.execute_script("return arguments[0].textContent || '';", item_card_element)
+        has_plus_flag = card_text.include?('+')
+      rescue => e
+        # テキスト取得に失敗した場合はスキップ
+      end
+      
+      # バリエーション数と"+"フラグに基づいて取得ステータスを決定
+      if item_vari_num > 4 || has_plus_flag
         acquired_status = false
       else
         acquired_status = true
