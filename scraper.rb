@@ -1,5 +1,6 @@
 require "selenium-webdriver"
 require 'json'
+require 'set'
 
 def start_up_selenium
   options = Selenium::WebDriver::Chrome::Options.new
@@ -28,32 +29,56 @@ def scrape_nike_list_page(driver, wait, url, logger)
   wait.until { driver.find_element(:xpath, wall_header_xpath).displayed? }
 
   # スクロールしながら全商品を取得
-  previous_items_count = 0
+  previous_unique_count = 0
+  unchanged_attempts = 0
 
   while true
-    # 現在の高さを10分割してスクロール
+    # 現在の高さと位置
     total_height = driver.execute_script("return document.body.scrollHeight")
-    scroll_step = total_height / 10
-    current_position = 0
+    current_position = driver.execute_script("return window.pageYOffset || document.documentElement.scrollTop")
 
-    # 10段階でスクロール
-    10.times do
-      current_position += scroll_step
-      scroll_script = "window.scrollTo({ top: #{current_position}, behavior: 'smooth' });"
-      driver.execute_script(scroll_script)
-      sleep rand(0.3..0.7)
+    # 20ステップで、残距離の約85%へ小刻みに前進（各ステップ0.5秒前後待機）
+    20.times do
+      current_y = driver.execute_script("return window.pageYOffset || document.documentElement.scrollTop")
+      total_height = driver.execute_script("return document.body.scrollHeight")
+      max_scroll_y = [total_height - driver.execute_script("return window.innerHeight"), 0].max
+      break if current_y >= max_scroll_y
+
+      target_y = current_y + ((max_scroll_y - current_y) * 0.85).to_i
+      target_y = [target_y, max_scroll_y].min
+      driver.execute_script("window.scrollTo({ top: arguments[0], behavior: 'smooth' });", target_y)
+      sleep rand(0.45..0.6)
     end
     sleep(rand(3..5))
 
-    # 現在の商品数を取得
+    # 現在のカード要素から商品URLのユニーク件数を取得
     current_items = driver.find_elements(:xpath, item_card_xpath)
-    current_items_count = current_items.size
-    log_info_message("取得数: #{current_items.size}", logger)
+    urls = current_items.map do |el|
+      begin
+        el.find_element(:xpath, item_url_xpath).attribute("href")
+      rescue
+        nil
+      end
+    end.compact
+    unique_count = urls.to_set.size
+    log_info_message("ユニークURL数: #{unique_count} (前回: #{previous_unique_count})", logger)
 
-    # 商品数に変化がなければ終了
-    break if current_items_count == previous_items_count
+    # 商品数に変化がなければ、10%上へスムーズにバウンスして再度最下部へ（最大3回）
+    if unique_count == previous_unique_count
+      unchanged_attempts += 1
+      total_height_for_bounce = driver.execute_script("return document.body.scrollHeight")
+      up_amount = (total_height_for_bounce * 0.10).to_i
+      driver.execute_script("window.scrollBy({ top: arguments[0], behavior: 'smooth' });", -up_amount)
+      sleep rand(0.5..1.0)
+      driver.execute_script("window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });")
+      sleep rand(0.5..1.0)
+      break if unchanged_attempts >= 3
+      next
+    else
+      unchanged_attempts = 0
+    end
     
-    previous_items_count = current_items_count
+    previous_unique_count = unique_count
   end
 
   # 商品カード要素をすべて取得
