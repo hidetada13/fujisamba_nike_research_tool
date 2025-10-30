@@ -12,6 +12,155 @@ def start_up_selenium
   return driver, wait
 end
 
+#--------------------------------------
+# スコープ内で要素を検索（CSSセレクター対応）
+#--------------------------------------
+def find_element_in_scope_by_css(scope, driver, selectors)
+  selectors.each do |css|
+    begin
+      element = scope.find_element(css: css)
+      return element if element
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      next
+    rescue => e
+      next
+    end
+  end
+  nil
+end
+
+#--------------------------------------
+# スコープ内で複数要素を検索（CSSセレクター対応）
+#--------------------------------------
+def find_elements_in_scope_by_css(scope, selectors)
+  selectors.each do |css|
+    begin
+      elements = scope.find_elements(css: css)
+      return elements if elements && !elements.empty?
+    rescue Selenium::WebDriver::Error::NoSuchElementError
+      next
+    rescue => e
+      next
+    end
+  end
+  []
+end
+
+#--------------------------------------
+# 画像URLから画像IDを抽出
+#--------------------------------------
+def extract_image_id_from_url(url)
+  return nil if url.nil? || url.empty?
+  url.split("/")[-2]
+rescue => e
+  nil
+end
+
+#--------------------------------------
+# バリエーション画像IDを取得（nike.rbの実装を参考）
+#--------------------------------------
+def extract_variation_image_ids(card_element, driver, item_vari_num, item_icon_img_element)
+  item_vari_img_ids = []
+  
+  begin
+    # バリエーションコンテナを探す（複数のセレクターで試行）
+    colorways_container = find_element_in_scope_by_css(
+      card_element,
+      driver,
+      [
+        '[data-testid="product-card__colorways"]',
+        '.product-card__colorways',
+        '[class*="colorways"]',
+        'div[class*="colorway"]'
+      ]
+    )
+    
+    if colorways_container.nil?
+      # コンテナが見つからない場合、メイン画像のIDのみ使用
+      if item_icon_img_element
+        img_id = extract_image_id_from_url(item_icon_img_element.attribute("src"))
+        return [img_id] if img_id
+      end
+      return []
+    end
+    
+    # バリエーションリンクを取得
+    colorway_links = colorways_container.find_elements(css: 'a.colorway')
+    
+    if colorway_links.empty?
+      # リンクが見つからない場合、代替セレクターを試行
+      colorway_links = find_elements_in_scope_by_css(
+        colorways_container,
+        [
+          'a[class*="colorway"]',
+          'a[data-testid*="colorway"]',
+          'div[class*="colorway"] a'
+        ]
+      )
+    end
+    
+    if item_vari_num == 1
+      # 単一バリエーションの場合
+      if item_icon_img_element
+        img_id = extract_image_id_from_url(item_icon_img_element.attribute("src"))
+        return [img_id] if img_id
+      end
+    else
+      # 複数バリエーションの場合
+      colorway_links.each do |link|
+        begin
+          # product-code属性から取得を試みる
+          color_circle = link.find_element(css: '.color-loader__circle')
+          product_code = color_circle.attribute('product-code')
+          if product_code && !product_code.empty?
+            item_vari_img_ids << product_code
+            next
+          end
+        rescue => e
+          # product-code取得失敗時は画像URLから取得
+        end
+        
+        begin
+          # 画像要素を探す
+          img_element = find_element_in_scope_by_css(
+            link,
+            driver,
+            [
+              'img',
+              '.color-loader__circle img',
+              'div img',
+              'picture img'
+            ]
+          )
+          
+          if img_element
+            img_id = extract_image_id_from_url(img_element.attribute("src")) || 
+                     extract_image_id_from_url(img_element.attribute("currentSrc"))
+            item_vari_img_ids << img_id if img_id
+          end
+        rescue => e
+          # 画像取得失敗はスキップ
+          next
+        end
+      end
+      
+      # 画像IDが取得できない場合は、メイン画像のIDを使用
+      if item_vari_img_ids.empty? && item_icon_img_element
+        img_id = extract_image_id_from_url(item_icon_img_element.attribute("src"))
+        item_vari_img_ids << img_id if img_id
+      end
+    end
+  rescue => e
+    # エラー時はメイン画像のIDのみ返す
+    if item_icon_img_element
+      img_id = extract_image_id_from_url(item_icon_img_element.attribute("src"))
+      return [img_id] if img_id
+    end
+  end
+  
+  item_vari_img_ids.compact.uniq
+end
+
 def scrape_nike_list_page(driver, wait, url, logger)
   # XPATH ##############################################
   wall_header_xpath = "//div[@class='wall-header__content']"
@@ -20,7 +169,6 @@ def scrape_nike_list_page(driver, wait, url, logger)
   item_icon_img_xpath = "./figure/a[2]/div[1]/img[1]"
   item_title_xpath = "./figure/div[1]//div[@class='product-card__title']"
   item_vari_num_xpath = "./figure/div[1]/div[2]"
-  item_vari_img_xpath = "./figure//div[@class='product-card__colorways-thumbs']/a/div/picture/img[1]"
   ######################################################
   log_message = "URL: #{url}"
   logger.info(log_message)
@@ -110,14 +258,13 @@ def scrape_nike_list_page(driver, wait, url, logger)
       actions.move_to(item_icon_img_element).perform
       sleep(1)
 
-      if item_vari_num == 1
-        item_vari_img_ids = [
-          item_icon_img_element.attribute("src").split("/")[-2]
-        ]
-      else
-        item_vari_img_elements = item_card_element.find_elements(:xpath, item_vari_img_xpath)
-        item_vari_img_ids = item_vari_img_elements.map { |element| element.attribute("src").split("/")[-2] }
-      end
+      # バリエーション画像IDを取得（nike.rbの実装を参考に改修）
+      item_vari_img_ids = extract_variation_image_ids(
+        item_card_element,
+        driver,
+        item_vari_num,
+        item_icon_img_element
+      )
       
       item_data = {
         item_url: item_url,
