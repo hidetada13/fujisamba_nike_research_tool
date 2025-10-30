@@ -109,19 +109,7 @@ def extract_variation_image_ids(card_element, driver, item_vari_num, item_icon_i
       # 複数バリエーションの場合
       colorway_links.each do |link|
         begin
-          # product-code属性から取得を試みる
-          color_circle = link.find_element(css: '.color-loader__circle')
-          product_code = color_circle.attribute('product-code')
-          if product_code && !product_code.empty?
-            item_vari_img_ids << product_code
-            next
-          end
-        rescue => e
-          # product-code取得失敗時は画像URLから取得
-        end
-        
-        begin
-          # 画像要素を探す
+          # 画像要素を探す（画像URLから画像IDを抽出）
           img_element = find_element_in_scope_by_css(
             link,
             driver,
@@ -134,8 +122,9 @@ def extract_variation_image_ids(card_element, driver, item_vari_num, item_icon_i
           )
           
           if img_element
-            img_id = extract_image_id_from_url(img_element.attribute("src")) || 
-                     extract_image_id_from_url(img_element.attribute("currentSrc"))
+            # 画像URLから画像IDを抽出（srcまたはcurrentSrc）
+            img_url = img_element.attribute("src") || img_element.attribute("currentSrc")
+            img_id = extract_image_id_from_url(img_url)
             item_vari_img_ids << img_id if img_id
           end
         rescue => e
